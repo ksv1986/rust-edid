@@ -234,25 +234,343 @@ named!(parse_descriptor<&[u8], Descriptor>,
 );
 
 #[derive(Debug, PartialEq)]
+pub struct DataBlockHeader {
+	pub header: u8,
+}
+
+impl DataBlockHeader {
+	pub fn type_tag(&self) -> u8 {
+		return self.header & 0xe0u8;
+	}
+
+	pub fn len(&self) -> usize {
+		return (self.header & 0x1fu8) as usize;
+	}
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ShortAudioDescriptor {
+	pub format_and_channels: u8,
+	pub sampling_frequences: u8,
+	pub bitrate_or_bitdepth: u8,
+}
+
+#[allow(dead_code)]
+impl ShortAudioDescriptor {
+	pub fn channels(&self) -> u8 {
+		return (self.format_and_channels & 0x7u8) + 1;
+	}
+
+	pub fn format(&self) -> u8 {
+		return self.format_and_channels & 0x78u8;
+	}
+
+	pub fn bitrate(&self) -> Option<u32> {
+		match self.format() {
+			ShortAudioDescriptor::AC3..=ShortAudioDescriptor::WMAPRO => {
+				Some(8000 * self.bitrate_or_bitdepth as u32)
+			}
+			_ => None,
+		}
+	}
+
+	pub fn bit_depths(&self) -> Option<u8> {
+		match self.format() {
+			ShortAudioDescriptor::LPCM => Some(self.bitrate_or_bitdepth & 0x7u8),
+			_ => None,
+		}
+	}
+
+	// audio format values
+	pub const LPCM: u8 = 1u8 << 3;
+	pub const AC3: u8 = 2u8 << 3;
+	pub const MPEG1: u8 = 3u8 << 3;
+	pub const MP3: u8 = 4u8 << 3;
+	pub const MPEG2: u8 = 5u8 << 3;
+	pub const AAC: u8 = 6u8 << 3;
+	pub const DTS: u8 = 7u8 << 3;
+	pub const ATRAC: u8 = 8u8 << 3;
+	pub const DSD: u8 = 9u8 << 3;
+	pub const DDPLUS: u8 = 10u8 << 3;
+	pub const DTSHD: u8 = 11u8 << 3;
+	pub const TRUEHD: u8 = 12u8 << 3;
+	pub const DSTAUDIO: u8 = 13u8 << 3;
+	pub const WMAPRO: u8 = 14u8 << 3;
+	pub const RESERVED: u8 = 15u8 << 3;
+
+	// supported sampling frequences
+	pub const SAMPLE_FREQUENCY_192_KHZ: u8 = 1u8 << 6;
+	pub const SAMPLE_FREQUENCY_176_KHZ: u8 = 1u8 << 5;
+	pub const SAMPLE_FREQUENCY_96_KHZ: u8 = 1u8 << 4;
+	pub const SAMPLE_FREQUENCY_88_KHZ: u8 = 1u8 << 3;
+	pub const SAMPLE_FREQUENCY_48_KHZ: u8 = 1u8 << 2;
+	pub const SAMPLE_FREQUENCY_44_1_KHZ: u8 = 1u8 << 1;
+	pub const SAMPLE_FREQUENCY_32_KHZ: u8 = 1u8 << 0;
+
+	// supported bid depth (if audio format is LPCM)
+	pub const LPCM_24_BIT: u8 = 1u8 << 2;
+	pub const LPCM_20_BIT: u8 = 1u8 << 1;
+	pub const LPCM_16_BIT: u8 = 1u8 << 0;
+}
+
+#[derive(Debug, PartialEq)]
+pub struct AudioBlock {
+	pub header: DataBlockHeader,
+	pub descriptors: Vec<ShortAudioDescriptor>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ShortVideoDescriptor {
+	pub payload: u8,
+}
+
+#[allow(dead_code)]
+impl ShortVideoDescriptor {
+	pub fn is_native(&self) -> bool {
+		(self.payload & 0x80u8) != 0 && (self.payload & 0x7fu8) <= 64
+	}
+
+	pub fn cea861_index(&self) -> usize {
+		if self.payload <= (64u8 | 0x80u8) {
+			(self.payload & !0x80u8) as usize
+		} else {
+			self.payload as usize
+		}
+	}
+}
+
+#[derive(Debug, PartialEq)]
+pub struct VideoBlock {
+	pub header: DataBlockHeader,
+	pub descriptors: Vec<ShortVideoDescriptor>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct VendorSpecific {
+	pub header: DataBlockHeader,
+	pub identifier: [u8; 3],
+	pub payload: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct SpeakerAllocation {
+	pub header: DataBlockHeader,
+	pub speakers: u8,
+	pub reserved: [u8; 2],
+}
+
+impl SpeakerAllocation {
+	pub const REAR_LEFT_RIGHT_CENTER: u8 = (1u8 << 6);
+	pub const FRONT_LEFT_RIGHT_CENTER: u8 = (1u8 << 5);
+	pub const REAR_CENTER: u8 = (1u8 << 4);
+	pub const REAR_LEFT_RIGHT: u8 = (1u8 << 3);
+	pub const FRONT_CENTER: u8 = (1u8 << 2);
+	pub const LFE: u8 = (1u8 << 1);
+	pub const FRONT_LEFT_RIGHT: u8 = (1u8 << 0);
+}
+
+#[derive(Debug, PartialEq)]
+pub struct DataBlockReserved {
+	pub header: DataBlockHeader,
+	pub payload: Vec<u8>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DataBlock {
+	Reserved(DataBlockReserved),
+	AudioBlock(AudioBlock),
+	VideoBlock(VideoBlock),
+	VendorSpecific(VendorSpecific),
+	SpeakerAllocation(SpeakerAllocation),
+}
+
+#[derive(Debug, PartialEq)]
+pub struct CEAEDID {
+	pub native_dtd: u8,
+	pub blocks: Vec<DataBlock>,
+	pub descriptors: Vec<DetailedTiming>,
+}
+
+impl CEAEDID {
+	// native DTD information bits
+	pub const DTD_UNDERSCAN: u8 = (1u8 << 7); // display supports underscan
+	pub const DTD_BASIC_AUDIO: u8 = (1u8 << 6); // display supports basic audio
+	pub const DTD_YUV444: u8 = (1u8 << 5); // display supports YCbCr 4∶4∶4
+	pub const DTD_YUV422: u8 = (1u8 << 4); // display supports YCbCr 4∶2∶2
+}
+
+fn error_tag<E>(input: &[u8]) -> nom::IResult<&[u8], E> {
+	Err(nom::Err::Error((input, nom::error::ErrorKind::Tag)))
+}
+
+fn error_needed<E>(_input: &[u8], size: usize) -> nom::IResult<&[u8], E> {
+	Err(nom::Err::Incomplete(nom::Needed::Size(size)))
+}
+
+fn parse_block(input: &[u8]) -> nom::IResult<&[u8], Vec<DataBlock>> {
+	let mut v = Vec::new();
+	let mut i = &input[..];
+	while i.len() > 0 {
+		let hdr = DataBlockHeader { header: i[0] };
+		i = &i[1..];
+		let len = hdr.len();
+		if len > i.len() {
+			return error_needed(i, hdr.len() - i.len());
+		}
+		match hdr.type_tag() {
+			0x20 => {
+				if len < 3 || len % 3 != 0 {
+					return error_tag(i);
+				}
+				let mut d = Vec::new();
+				let mut pos = 0;
+				while pos < len {
+					d.push(ShortAudioDescriptor {
+						format_and_channels: i[pos],
+						sampling_frequences: i[pos + 1],
+						bitrate_or_bitdepth: i[pos + 2],
+					});
+					pos += 3;
+				}
+				v.push(DataBlock::AudioBlock(AudioBlock {
+					header: hdr,
+					descriptors: d,
+				}));
+			}
+
+			0x40 => {
+				if len < 1 {
+					return error_tag(i);
+				}
+				let mut d = Vec::new();
+				let mut pos = 0;
+				while pos < len {
+					d.push(ShortVideoDescriptor { payload: i[pos] });
+					pos += 1;
+				}
+				v.push(DataBlock::VideoBlock(VideoBlock {
+					header: hdr,
+					descriptors: d,
+				}));
+			}
+
+			0x60 => {
+				if len < 3 {
+					return error_tag(i);
+				}
+				v.push(DataBlock::VendorSpecific(VendorSpecific {
+					header: hdr,
+					identifier: [i[0], i[1], i[2]],
+					payload: Vec::from(&i[3..len]),
+				}));
+			}
+
+			0x80 => {
+				if len != 3 {
+					return error_tag(i);
+				}
+				if i[1] != 0 || i[2] != 0 {
+					return error_tag(i);
+				}
+				v.push(DataBlock::SpeakerAllocation(SpeakerAllocation {
+					header: hdr,
+					speakers: i[0],
+					reserved: [i[1], i[2]],
+				}));
+			}
+
+			_ => v.push(DataBlock::Reserved(DataBlockReserved {
+				header: hdr,
+				payload: Vec::from(&i[..len]),
+			})),
+		}
+		i = &i[len..];
+	}
+	Ok((i, v))
+}
+
+fn parse_descriptors(input: &[u8]) -> nom::IResult<&[u8], Vec<DetailedTiming>> {
+	let mut v = Vec::new();
+	let mut i = &input[..];
+	while i.len() >= 18 && (i[0] != 0 || i[1] != 0) {
+		let (rest, dtd) = parse_detailed_timing(i)?;
+		v.push(dtd);
+		i = &rest[..];
+	}
+	Ok((i, v))
+}
+
+fn parse_extension(i: &[u8]) -> nom::IResult<&[u8], CEAEDID> {
+	validate(i)?;
+	let offs = i[2] as usize;
+	let native_dtd = i[3];
+	if offs == 0 {
+		return Ok((
+			&i[128..],
+			CEAEDID {
+				native_dtd,
+				blocks: Vec::new(),
+				descriptors: Vec::new(),
+			},
+		));
+	}
+	let (_, blocks) = parse_block(&i[4..offs])?;
+	let (mut tail, descriptors) = parse_descriptors(&i[offs..127])?;
+	while tail.len() > 0 {
+		if tail[0] != 0 {
+			return error_tag(tail);
+		}
+		tail = &tail[1..];
+	}
+	Ok((
+		&i[128..],
+		CEAEDID {
+			native_dtd,
+			blocks,
+			descriptors,
+		},
+	))
+}
+
+#[derive(Debug, PartialEq)]
 pub struct EDID {
 	pub header: Header,
 	pub display: Display,
-	chromaticity: (), // TODO
+	chromaticity: (),       // TODO
 	established_timing: (), // TODO
-	standard_timing: (), // TODO
+	standard_timing: (),    // TODO
 	pub descriptors: Vec<Descriptor>,
+	pub extension: Option<CEAEDID>,
+}
+
+fn validate(input: &[u8]) -> nom::IResult<&[u8], ()> {
+	if input.len() < 128 {
+		return error_needed(input, 128 - input.len());
+	}
+
+	let mut sum = 0u8;
+	for b in &input[..128] {
+		sum = sum.wrapping_add(*b);
+	}
+	if sum == 0u8 {
+		Ok((input, ()))
+	} else {
+		error_tag(input)
+	}
 }
 
 named!(parse_edid<&[u8], EDID>, do_parse!(
-	header: parse_header
+	call!(validate)
+	>> header: parse_header
 	>> display: parse_display
 	>> chromaticity: parse_chromaticity
 	>> established_timing: parse_established_timing
 	>> standard_timing: parse_standard_timing
 	>> descriptors: count!(parse_descriptor, 4)
-	>> take!(1) // number of extensions
+	>> extension_nr: le_u8
 	>> take!(1) // checksum
-	>> (EDID{header, display, chromaticity, established_timing, standard_timing, descriptors})
+	>> extension: cond!(extension_nr == 1, parse_extension)
+	>> (EDID{header, display, chromaticity, established_timing, standard_timing, descriptors, extension})
 ));
 
 pub fn parse(data: &[u8]) -> nom::IResult<&[u8], EDID> {
@@ -320,6 +638,7 @@ mod tests {
 				Descriptor::ProductName("SyncMaster".to_string()),
 				Descriptor::SerialNumber("HS3P701105".to_string()),
 			),
+			extension: None,
 		};
 
 		test(d, &expected);
@@ -370,6 +689,163 @@ mod tests {
 				Descriptor::UnspecifiedText("DJCP6ÇLQ133M1".to_string()),
 				Descriptor::Unknown(vec![2, 65, 3, 40, 0, 18, 0, 0, 11, 1, 10, 32, 32]),
 			),
+			extension: None,
+		};
+
+		test(d, &expected);
+	}
+
+	#[test]
+	fn test_card0_hdmi_1() {
+		let d = include_bytes!("../testdata/card0-HDMI-1");
+
+		let expected = EDID{
+			header: Header {
+				vendor: ['D', 'E', 'L'],
+				product: 41099,
+				serial: 809851217,
+				week: 15,
+				year: 23,
+				version: 1,
+				revision: 3,
+			},
+			display: Display {
+				video_input: 128,
+				width: 53,
+				height: 30,
+				gamma: 120,
+				features: 234,
+			},
+			chromaticity: (),
+			established_timing: (),
+			standard_timing: (),
+			descriptors: vec![
+				Descriptor::DetailedTiming(DetailedTiming {
+					pixel_clock: 148500,
+					horizontal_active_pixels: 1920,
+					horizontal_blanking_pixels: 280,
+					vertical_active_lines: 1080,
+					vertical_blanking_lines: 45,
+					horizontal_front_porch: 88,
+					horizontal_sync_width: 44,
+					vertical_front_porch: 4,
+					vertical_sync_width: 5,
+					horizontal_size: 531,
+					vertical_size: 299,
+					horizontal_border_pixels: 0,
+					vertical_border_pixels: 0,
+					features: 30,
+				}),
+				Descriptor::SerialNumber("67Y4J34A0EYQ".to_string()),
+				Descriptor::ProductName("DELL S2440L".to_string()),
+				Descriptor::RangeLimits,
+			],
+			extension: Some(CEAEDID {
+				native_dtd: 241,
+				blocks: vec![
+					DataBlock::VideoBlock(VideoBlock {
+						header: DataBlockHeader { header: 76 },
+						descriptors: vec![
+							ShortVideoDescriptor { payload: 144 },
+							ShortVideoDescriptor { payload: 5 },
+							ShortVideoDescriptor { payload: 4 },
+							ShortVideoDescriptor { payload: 3 },
+							ShortVideoDescriptor { payload: 2 },
+							ShortVideoDescriptor { payload: 7 },
+							ShortVideoDescriptor { payload: 22 },
+							ShortVideoDescriptor { payload: 1 },
+							ShortVideoDescriptor { payload: 20 },
+							ShortVideoDescriptor { payload: 31 },
+							ShortVideoDescriptor { payload: 18 },
+							ShortVideoDescriptor { payload: 19 },
+						],
+					}),
+					DataBlock::AudioBlock(AudioBlock {
+						header: DataBlockHeader { header: 35 },
+						descriptors: vec![ShortAudioDescriptor {
+							format_and_channels: 9,
+							sampling_frequences: 7,
+							bitrate_or_bitdepth: 7,
+						}],
+					}),
+					DataBlock::VendorSpecific(VendorSpecific {
+						header: DataBlockHeader { header: 101 },
+						identifier: [3, 12, 0],
+						payload: vec![16, 0],
+					}),
+					DataBlock::SpeakerAllocation(SpeakerAllocation {
+						header: DataBlockHeader { header: 131 },
+						speakers: 1,
+						reserved: [0, 0],
+					}),
+				],
+				descriptors: vec![
+					DetailedTiming {
+						pixel_clock: 148500,
+						horizontal_active_pixels: 1920,
+						horizontal_blanking_pixels: 280,
+						vertical_active_lines: 1080,
+						vertical_blanking_lines: 45,
+						horizontal_front_porch: 88,
+						horizontal_sync_width: 44,
+						vertical_front_porch: 4,
+						vertical_sync_width: 5,
+						horizontal_size: 531,
+						vertical_size: 299,
+						horizontal_border_pixels: 0,
+						vertical_border_pixels: 0,
+						features: 30,
+					},
+					DetailedTiming {
+						pixel_clock: 74250,
+						horizontal_active_pixels: 1920,
+						horizontal_blanking_pixels: 280,
+						vertical_active_lines: 540,
+						vertical_blanking_lines: 22,
+						horizontal_front_porch: 88,
+						horizontal_sync_width: 44,
+						vertical_front_porch: 2,
+						vertical_sync_width: 5,
+						horizontal_size: 531,
+						vertical_size: 299,
+						horizontal_border_pixels: 0,
+						vertical_border_pixels: 0,
+						features: 158,
+					},
+					DetailedTiming {
+						pixel_clock: 74250,
+						horizontal_active_pixels: 1280,
+						horizontal_blanking_pixels: 370,
+						vertical_active_lines: 720,
+						vertical_blanking_lines: 30,
+						horizontal_front_porch: 110,
+						horizontal_sync_width: 40,
+						vertical_front_porch: 5,
+						vertical_sync_width: 5,
+						horizontal_size: 531,
+						vertical_size: 299,
+						horizontal_border_pixels: 0,
+						vertical_border_pixels: 0,
+						features: 30,
+					},
+					DetailedTiming {
+						pixel_clock: 27000,
+						horizontal_active_pixels: 720,
+						horizontal_blanking_pixels: 138,
+						vertical_active_lines: 480,
+						vertical_blanking_lines: 45,
+						horizontal_front_porch: 16,
+						horizontal_sync_width: 62,
+						vertical_front_porch: 9,
+						vertical_sync_width: 6,
+						horizontal_size: 531,
+						vertical_size: 299,
+						horizontal_border_pixels: 0,
+						vertical_border_pixels: 0,
+						features: 24,
+					},
+				],
+			}),
 		};
 
 		test(d, &expected);
