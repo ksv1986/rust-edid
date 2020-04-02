@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate nom;
 
-use nom::{be_u16, le_u8, le_u16, le_u32};
+use nom::number::streaming::{be_u16, le_u8, le_u16, le_u32};
 
 mod cp437;
 
@@ -160,7 +160,7 @@ pub enum Descriptor {
 	TimingCodes,
 	EstablishedTimings,
 	Dummy,
-	Unknown([u8; 13]),
+	Unknown(Vec<u8>),
 }
 
 named!(parse_descriptor<&[u8], Descriptor>,
@@ -220,7 +220,7 @@ named!(parse_descriptor<&[u8], Descriptor>,
 				) |
 				_ => do_parse!(
 					take!(1)
-					>> data: count_fixed!(u8, le_u8, 13)
+					>> data: count!(le_u8, 13)
 					>> (Descriptor::Unknown(data))
 				)
 			)
@@ -265,15 +265,12 @@ mod tests {
 
 	fn test(d: &[u8], expected: &EDID) {
 		match parse(d) {
-			nom::IResult::Done(remaining, parsed) => {
+			Ok((remaining, parsed)) => {
 				assert_eq!(remaining.len(), 0);
 				assert_eq!(&parsed, expected);
 			},
-			nom::IResult::Error(err) => {
+			Err(err) => {
 				panic!(format!("{}", err));
-			},
-			nom::IResult::Incomplete(_) => {
-				panic!("Incomplete");
 			},
 		}
 	}
@@ -371,7 +368,7 @@ mod tests {
 				}),
 				Descriptor::Dummy,
 				Descriptor::UnspecifiedText("DJCP6ÇLQ133M1".to_string()),
-				Descriptor::Unknown([2, 65, 3, 40, 0, 18, 0, 0, 11, 1, 10, 32, 32]),
+				Descriptor::Unknown(vec![2, 65, 3, 40, 0, 18, 0, 0, 11, 1, 10, 32, 32]),
 			),
 		};
 
